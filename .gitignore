@@ -1,0 +1,12 @@
+venv/
+__pycache
+/
+__
+.env
+.env/exemple
+data/
+logs/
+qdrant
+data/
+_
+eval/results/

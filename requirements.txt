@@ -1,0 +1,8 @@
+fastembed==0.8.1
+qdrant-client==1.19.1
+fastapi==0.142.2
+uvicorn[standard]>=0.30
+openai>=1.40
+pydantic-settings>=2.4
+prometheus-client>=0.20
+tqdm>=4.66
