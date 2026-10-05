@@ -1,0 +1,19 @@
+[project]
+name = "scicheck"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.142.2",
+    "fastembed==0.8.1",
+    "openai>=1.40",
+    "prometheus-client>=0.20",
+    "pydantic-settings>=2.4",
+    "qdrant-client==1.19.1",
+    "tqdm>=4.66",
+    "uvicorn[standard]>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.2",
+]
