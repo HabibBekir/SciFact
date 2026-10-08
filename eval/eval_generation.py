@@ -24,12 +24,24 @@ JUDGE = OpenAI(
 )
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", settings.llm_model)
 
-JUDGE_PROMPT = """You are a strict evaluator of a fact-checking assistant.
-Given DOCUMENTS, a CLAIM and the ASSISTANT ANSWER, decide:
-- faithful: true if EVERY factual statement in the answer is supported by the documents.
-- relevant: true if the answer addresses the claim with a clear verdict.
-First reason briefly, then output ONLY a JSON object:
-{"reasoning": "...", "faithful": true|false, "relevant": true|false}"""
+JUDGE_PROMPT = """You are a strict evaluator of a scientific fact-checking assistant.
+You receive DOCUMENTS (abstracts with ids), a CLAIM and the ASSISTANT ANSWER.
+
+Evaluate in this order:
+1. List every factual statement in the answer (ignore the verdict line).
+2. For each statement, check whether a document states it. Paraphrase is fine.
+   Details, numbers, authors, journals or study names that are not in the
+   documents are NOT supported, even if they are true.
+3. An id that is not in the list of valid ids is an invented citation.
+4. Check the verdict. SUPPORTED or REFUTED require a document reporting a result
+   about this exact claim; otherwise the justified verdict is NOT ENOUGH INFO.
+
+Answer with ONLY this JSON object, no other text:
+{"unsupported_statements": ["..."], "invented_citations": ["..."],
+ "faithful": true or false, "verdict_justified": true or false,
+ "reasoning": "one or two sentences"}
+faithful is true only if unsupported_statements and invented_citations are both empty."""
+
 
 # Affirmations sans rapport avec le corpus : la bonne réponse est NOT ENOUGH INFO.
 OFF_TOPIC = [
@@ -41,30 +53,49 @@ OFF_TOPIC = [
 ]
 
 
-def judge(question: str, hits: list[dict], answer: str) -> dict:
-    docs = "\n".join(f"[{h['doc_id']}] {h['title']}. {h['text']}" for h in hits)
-    r = JUDGE.chat.completions.create(
-        model=JUDGE_MODEL,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": JUDGE_PROMPT},
-            {
-                "role": "user",
-                "content": f"DOCUMENTS:\n{docs}\n\nCLAIM: {question}\n\nASSISTANT ANSWER:\n{answer}",
-            },
-        ],
-    )
-    text = r.choices[0].message.content
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+FABRICATED = re.compile(r"references\s*:|\bet al\.", re.IGNORECASE)
+
+
+def _parse_json(text: str) -> dict:
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not match:
+        return {}
     try:
-        return json.loads(match.group(0)) if match else {}
+        data = json.loads(match.group(0))
     except json.JSONDecodeError:
         return {}
+    return data if isinstance(data.get("faithful"), bool) else {}
 
 
-def citations_ok(answer: str, hits: list[dict]) -> bool:
+def judge(question: str, hits: list[dict], answer: str) -> dict:
+    docs = "\n".join(f"[{h['doc_id']}] {h['title']}. {h['text']}" for h in hits)
+    ids = ", ".join(h["doc_id"] for h in hits)
+    messages = [
+        {"role": "system", "content": JUDGE_PROMPT},
+        {
+            "role": "user",
+            "content": f"DOCUMENTS (valid ids: {ids}):\n{docs}\n\n"
+            f"CLAIM: {question}\n\nASSISTANT ANSWER:\n{answer}",
+        },
+    ]
+    for _ in range(2):
+        r = JUDGE.chat.completions.create(
+            model=JUDGE_MODEL, temperature=0, messages=messages, response_format={"type": "json_object"}
+        )
+        data = _parse_json(r.choices[0].message.content)
+        if data:
+            return data
+    return {}
+
+
+def citation_check(answer: str, hits: list[dict]) -> tuple[bool, bool]:
+    """Renvoie (citations_ok, invented). invented = id hors sources ou références inventées."""
     cited = set(re.findall(r"\[(\d+)\]", answer))
-    return bool(cited) and cited <= {h["doc_id"] for h in hits}
+    allowed = {h["doc_id"] for h in hits}
+    invented = bool(cited - allowed) or bool(FABRICATED.search(answer))
+    if parse_verdict(answer) == "NOT ENOUGH INFO":
+        return not invented, invented
+    return bool(cited) and not invented, invented
 
 
 if __name__ == "__main__":
@@ -81,15 +112,18 @@ if __name__ == "__main__":
         hits = retrieve(q)
         answer = generate(q, hits)
         j = judge(q, hits, answer)
+        cit_ok, invented = citation_check(answer, hits)
         rows.append(
             {
                 "qid": qid,
                 "claim": q,
                 "answer": answer,
                 "verdict": parse_verdict(answer),
-                "faithful": j.get("faithful"),
+                "faithful": False if invented else j.get("faithful"),
                 "relevant": j.get("relevant"),
-                "citations_ok": citations_ok(answer, hits),
+                "judge_error": "faithful" not in j,
+                "citations_ok": cit_ok,
+                "invented": invented,
                 "gold_in_context": bool({h["doc_id"] for h in hits} & set(qrels[qid])),
             }
         )
@@ -99,13 +133,12 @@ if __name__ == "__main__":
         off.append({"claim": q, "answer": answer, "abstained": parse_verdict(answer) == "NOT ENOUGH INFO"})
 
     def rate(key, data):
-        vals = [r[key] for r in data if r[key] is not None]
-        return round(sum(vals) / len(vals), 3) if vals else None
+        return round(sum(r[key] is True for r in data) / len(data), 3)
 
     summary = {
         "n": len(rows),
         "fidelite": rate("faithful", rows),
-        "pertinence": rate("relevant", rows),
+        "verdict_justifie": rate("verdict_justified", rows),
         "citations_valides": rate("citations_ok", rows),
         "bon_doc_dans_contexte": rate("gold_in_context", rows),
         "abstention_hors_sujet": rate("abstained", off),
@@ -113,6 +146,8 @@ if __name__ == "__main__":
             v: sum(r["verdict"] == v for r in rows)
             for v in ("SUPPORTED", "REFUTED", "NOT ENOUGH INFO", "OTHER")
         },
+        "citations_inventees": rate("invented", rows),
+        "erreurs_juge": sum(r["judge_error"] for r in rows),
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     Path("eval/results").mkdir(parents=True, exist_ok=True)
