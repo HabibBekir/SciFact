@@ -1,0 +1,51 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest   # en production, épinglez une version précise
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # pas de "ports:" en production : Qdrant n'est joignable que par l'API
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - qdrant
+    ports:
+      - "127.0.0.1:8000:8000"   # accessible seulement depuis la machine (Caddy devant)
+
+  # LLM local (optionnel) : docker compose --profile ollama up -d
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    profiles: ["ollama"]
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # Monitoring (optionnel) : docker compose --profile monitoring up -d
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  qdrant_data:
+  ollama_data:
+  grafana_data:
